@@ -1,11 +1,13 @@
-﻿// ==UserScript==
+// ==UserScript==
 // @name         Instagzam — Unified Notes + Stories & Anti-Doomscroll Reels
 // @namespace    instagzam
-// @version      2.0.0
+// @version      2.0.1
 // @description  Redirects home to DMs, unifies stories + notes into one strip, adds create shortcuts, and locks reels so you can watch shared reels without doomscrolling.
 // @author       personal
 // @match        *://*.instagram.com/*
 // @match        *://instagram.com/*
+// @updateURL    https://raw.githubusercontent.com/mehuljain866/Instagzam/main/instagzam.user.js
+// @downloadURL  https://raw.githubusercontent.com/mehuljain866/Instagzam/main/instagzam.user.js
 // @run-at       document-start
 // @grant        none
 // ==/UserScript==
