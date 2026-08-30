@@ -1,8 +1,8 @@
 ﻿// ==UserScript==
 // @name         Instagzam — Unified Notes + Stories & Anti-Doomscroll Reels
 // @namespace    instagzam
-// @version      1.2.0
-// @description  Merges notes and stories into one strip in DMs, adds story/note creation & profile shortcuts, dismisses "Open in app" popups, and locks reels to prevent doomscrolling.
+// @version      2.0.0
+// @description  Redirects home to DMs, unifies stories + notes into one strip, adds create shortcuts, and locks reels so you can watch shared reels without doomscrolling.
 // @author       personal
 // @match        *://*.instagram.com/*
 // @match        *://instagram.com/*
@@ -13,24 +13,46 @@
 ;(function () {
   'use strict';
 
-  console.log('[igzam] Instagzam initialized on:', location.href);
+  // ─── Auto-Redirect Home Feed to DMs ────────────────────────────────────────
+  function checkHomeRedirect () {
+    const p = location.pathname;
+    if (p === '/' || p === '' || p === '/index.php' || p === '/index.html') {
+      console.log('[igzam] Redirecting from home feed to DMs...');
+      window.location.replace('https://www.instagram.com/direct/inbox/');
+    }
+  }
+  checkHomeRedirect();
 
-  // ─── State ────────────────────────────────────────────────────────────────
+  // ─── State & Cache ─────────────────────────────────────────────────────────
+
+  const CACHE_STORIES_KEY = 'igzam_stories_cache_v2';
+  const CACHE_VIEWER_KEY = 'igzam_viewer_cache_v2';
+
+  let cachedStories = [];
+  try {
+    cachedStories = JSON.parse(localStorage.getItem(CACHE_STORIES_KEY) || '[]');
+  } catch {}
+
+  let cachedViewer = null;
+  try {
+    cachedViewer = JSON.parse(localStorage.getItem(CACHE_VIEWER_KEY) || 'null');
+  } catch {}
 
   const STATE = {
+    capturedHeaders: {},
     notes: [],
     myNote: null,
-    stories: [],
+    stories: Array.isArray(cachedStories) ? cachedStories : [],
     myStory: null,
-    viewer: null,
+    viewer: cachedViewer,
     rendered: false,
     fetching: false,
   };
 
-  // ─── CSS ──────────────────────────────────────────────────────────────────
+  // ─── CSS ───────────────────────────────────────────────────────────────────
 
   const STRIP_CSS = `
-    /* ── Kill "Open in App" popups and overlay blockers ── */
+    /* ── Hide "Open in App" popups and overlay blockers ── */
     [role="dialog"]:has(a[href*="instagram://"]),
     [role="dialog"]:has(a[href*="play.google.com"]),
     div[data-nosnippet]:has(a[href*="instagram://"]),
@@ -59,8 +81,8 @@
       box-sizing: border-box !important;
       width: 100% !important;
       position: relative !important;
-      z-index: 100 !important;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+      z-index: 9999 !important;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1) !important;
     }
     #igzam-strip::-webkit-scrollbar { display: none !important; }
 
@@ -84,7 +106,7 @@
       left: 50% !important;
       transform: translateX(-50%) !important;
       background: rgba(36, 36, 36, 0.95) !important;
-      border: 1px solid rgba(255, 255, 255, 0.18) !important;
+      border: 1px solid rgba(255, 255, 255, 0.2) !important;
       border-radius: 12px !important;
       padding: 3px 8px !important;
       font-size: 11px !important;
@@ -127,11 +149,9 @@
         #dc2743 45%, #cc2366 65%, #bc1888 80%, #f7b733 100%
       ) !important;
     }
-    .igzam-ring:active {
-      transform: scale(0.95) !important;
-    }
+    .igzam-ring:active { transform: scale(0.95) !important; }
 
-    /* ── Avatar Image Shell ── */
+    /* ── Avatar Shell ── */
     .igzam-avatar-shell {
       width: 100% !important;
       height: 100% !important;
@@ -171,9 +191,7 @@
       z-index: 12 !important;
       box-shadow: 0 1px 4px rgba(0,0,0,0.6) !important;
     }
-    .igzam-plus-badge:active {
-      transform: scale(0.9) !important;
-    }
+    .igzam-plus-badge:active { transform: scale(0.9) !important; }
 
     /* ── Username Label ── */
     .igzam-label {
@@ -223,9 +241,7 @@
       flex-direction: column !important;
       gap: 8px !important;
     }
-    #igzam-modal-overlay.active #igzam-action-sheet {
-      transform: translateY(0) !important;
-    }
+    #igzam-modal-overlay.active #igzam-action-sheet { transform: translateY(0) !important; }
     .igzam-sheet-title {
       font-size: 13px !important;
       font-weight: 600 !important;
@@ -265,11 +281,11 @@
     }
   `;
 
-  // ─── Helpers ──────────────────────────────────────────────────────────────
+  // ─── Helpers ───────────────────────────────────────────────────────────────
 
   function getCsrfToken () {
     const m = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
-    return m ? m[1] : '';
+    return m ? m[1] : (STATE.capturedHeaders['X-CSRFToken'] || '');
   }
 
   function getViewerPkFromCookie () {
@@ -293,14 +309,13 @@
     return /^\/(reel|reels)\//.test(location.pathname) || (location.pathname.includes('/p/') && !!document.querySelector('video'));
   }
 
-  // ─── Auto-dismiss "Open in App" Popups ────────────────────────────────────
+  // ─── Auto-dismiss App Popups ───────────────────────────────────────────────
 
   function dismissAppPopups () {
-    // Click "Not Now" / "Cancel" on app prompts
     const buttons = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
     for (const b of buttons) {
       const txt = (b.textContent || '').trim().toLowerCase();
-      if (['not now', 'cancel', 'dismiss', 'continue as web'].includes(txt)) {
+      if (['not now', 'cancel', 'dismiss', 'continue as web', 'not now'].includes(txt)) {
         const dialog = b.closest('[role="dialog"]');
         if (dialog && (dialog.textContent || '').toLowerCase().includes('app')) {
           b.click();
@@ -309,10 +324,108 @@
     }
   }
 
-  // ─── Viewer Detection ─────────────────────────────────────────────────────
+  // ─── Live Header Sniffing & Network Interception ───────────────────────────
+
+  const _origFetch = window.fetch;
+  window.fetch = async function (...args) {
+    const url = (typeof args[0] === 'string') ? args[0] : (args[0]?.url ?? '');
+
+    if (args[1]?.headers) {
+      try {
+        const h = args[1].headers;
+        if (h instanceof Headers) {
+          h.forEach((v, k) => { STATE.capturedHeaders[k] = v; });
+        } else if (typeof h === 'object') {
+          Object.assign(STATE.capturedHeaders, h);
+        }
+      } catch {}
+    }
+
+    const res = await _origFetch.apply(this, args);
+
+    if (url.includes('reels_tray')) {
+      res.clone().json().then(json => {
+        if (json?.tray && Array.isArray(json.tray)) {
+          STATE.stories = json.tray;
+          try { localStorage.setItem(CACHE_STORIES_KEY, JSON.stringify(json.tray)); } catch {}
+          if (json.my_week || json.my_story) STATE.myStory = json.my_week || json.my_story;
+          renderStrip();
+        }
+      }).catch(() => {});
+    }
+
+    if (url.includes('/notes/') && url.includes('get_notes')) {
+      res.clone().json().then(json => {
+        const raw = json.notes ?? json.data ?? [];
+        STATE.notes = Array.isArray(raw) ? raw : [];
+        const myNotes = json.my_notes ?? json.self_notes ?? [];
+        if (Array.isArray(myNotes) && myNotes.length > 0) STATE.myNote = myNotes[0];
+        renderStrip();
+      }).catch(() => {});
+    }
+
+    return res;
+  };
+
+  // ─── Proactive Data Fetching ───────────────────────────────────────────────
+
+  async function loadData () {
+    if (STATE.fetching) return;
+    STATE.fetching = true;
+
+    try {
+      const headers = {
+        'X-CSRFToken': getCsrfToken(),
+        'X-IG-App-ID': STATE.capturedHeaders['X-IG-App-ID'] || '936619743392459',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Accept': '*/*',
+        ...STATE.capturedHeaders,
+      };
+
+      const storiesPromise = _origFetch('https://www.instagram.com/api/v1/feed/reels_tray/', {
+        method: 'GET',
+        credentials: 'include',
+        headers,
+      }).then(r => r.ok ? r.json() : null).catch(() => null);
+
+      const notesPromise = _origFetch('https://www.instagram.com/api/v1/notes/get_notes/', {
+        method: 'GET',
+        credentials: 'include',
+        headers,
+      }).then(r => r.ok ? r.json() : null).catch(() => null);
+
+      const [storiesJson, notesJson] = await Promise.all([storiesPromise, notesPromise]);
+
+      if (storiesJson?.tray && Array.isArray(storiesJson.tray)) {
+        STATE.stories = storiesJson.tray;
+        try { localStorage.setItem(CACHE_STORIES_KEY, JSON.stringify(storiesJson.tray)); } catch {}
+        if (storiesJson.my_week || storiesJson.my_story) {
+          STATE.myStory = storiesJson.my_week || storiesJson.my_story;
+        }
+      }
+
+      if (notesJson) {
+        const rawNotes = notesJson.notes ?? notesJson.data ?? [];
+        STATE.notes = Array.isArray(rawNotes) ? rawNotes : [];
+        const myNotes = notesJson.my_notes ?? notesJson.self_notes ?? [];
+        if (Array.isArray(myNotes) && myNotes.length > 0) {
+          STATE.myNote = myNotes[0];
+        }
+      }
+
+      renderStrip();
+    } catch (e) {
+      console.warn('[igzam] loadData error:', e);
+      renderStrip();
+    } finally {
+      STATE.fetching = false;
+    }
+  }
+
+  // ─── Detect Viewer Info ────────────────────────────────────────────────────
 
   function detectViewerInfo () {
-    if (STATE.viewer?.username && STATE.viewer?.profilePic) return;
+    if (STATE.viewer?.username && STATE.viewer?.profilePic && STATE.viewer.username !== 'Your note') return;
     const cookiePk = getViewerPkFromCookie();
 
     const imgs = Array.from(document.querySelectorAll('img'));
@@ -328,6 +441,7 @@
               username: username,
               profilePic: img.src,
             };
+            try { localStorage.setItem(CACHE_VIEWER_KEY, JSON.stringify(STATE.viewer)); } catch {}
             return;
           }
         }
@@ -343,66 +457,7 @@
     }
   }
 
-  // ─── Proactive Fetch Data ─────────────────────────────────────────────────
-
-  async function loadData () {
-    if (STATE.fetching) return;
-    STATE.fetching = true;
-
-    try {
-      // 1. Fetch Stories Tray
-      const storiesPromise = fetch('https://www.instagram.com/api/v1/feed/reels_tray/', {
-        method: 'GET',
-        credentials: 'include',
-        headers: {
-          'X-CSRFToken': getCsrfToken(),
-          'X-IG-App-ID': '936619743392459',
-          'X-Requested-With': 'XMLHttpRequest',
-          'Accept': '*/*',
-        },
-      }).then(r => r.ok ? r.json() : null).catch(() => null);
-
-      // 2. Fetch Notes
-      const notesPromise = fetch('https://www.instagram.com/api/v1/notes/get_notes/', {
-        method: 'GET',
-        credentials: 'include',
-        headers: {
-          'X-CSRFToken': getCsrfToken(),
-          'X-IG-App-ID': '936619743392459',
-          'X-Requested-With': 'XMLHttpRequest',
-          'Accept': '*/*',
-        },
-      }).then(r => r.ok ? r.json() : null).catch(() => null);
-
-      const [storiesJson, notesJson] = await Promise.all([storiesPromise, notesPromise]);
-
-      if (storiesJson?.tray) {
-        STATE.stories = Array.isArray(storiesJson.tray) ? storiesJson.tray : [];
-        if (storiesJson.my_week || storiesJson.my_story) {
-          STATE.myStory = storiesJson.my_week || storiesJson.my_story;
-        }
-      }
-
-      if (notesJson) {
-        const rawNotes = notesJson.notes ?? notesJson.data ?? [];
-        STATE.notes = Array.isArray(rawNotes) ? rawNotes : [];
-        const myNotes = notesJson.my_notes ?? notesJson.self_notes ?? [];
-        if (Array.isArray(myNotes) && myNotes.length > 0) {
-          STATE.myNote = myNotes[0];
-        }
-      }
-
-      console.log(`[igzam] Data loaded: ${STATE.stories.length} stories, ${STATE.notes.length} notes`);
-      renderStrip();
-    } catch (e) {
-      console.warn('[igzam] loadData error:', e);
-      renderStrip();
-    } finally {
-      STATE.fetching = false;
-    }
-  }
-
-  // ─── Build Merged List ────────────────────────────────────────────────────
+  // ─── Build Merged Contact List ─────────────────────────────────────────────
 
   function buildMergedList () {
     detectViewerInfo();
@@ -472,7 +527,7 @@
     return [selfEntry, ...contacts];
   }
 
-  // ─── Modal Action Sheet ───────────────────────────────────────────────────
+  // ─── Modal Action Sheet ────────────────────────────────────────────────────
 
   function showCreateActionSheet (selfEntry) {
     let overlay = document.getElementById('igzam-modal-overlay');
@@ -515,7 +570,7 @@
         if (nativeNoteBtn) {
           nativeNoteBtn.click();
         } else {
-          alert('Tap on your note pill or use the Instagram mobile app to post a note.');
+          alert('Tap on your note pill or use Instagram app to post a note.');
         }
       });
 
@@ -556,7 +611,7 @@
     }
   }
 
-  // ─── Build Strip DOM ───────────────────────────────────────────────────────
+  // ─── Build Strip DOM ────────────────────────────────────────────────────────
 
   function buildStrip (items) {
     const strip = document.createElement('div');
@@ -651,39 +706,42 @@
     return strip;
   }
 
-  // ─── Render Strip into DMs Page ───────────────────────────────────────────
+  // ─── Render Strip into DMs ─────────────────────────────────────────────────
 
   function renderStrip () {
     if (!isDMsPage()) return;
-    if (document.getElementById('igzam-strip')) return;
 
     injectCSS();
     const items = buildMergedList();
     if (!items.length) return;
 
-    // Find insertion target on DMs page
+    const existing = document.getElementById('igzam-strip');
+    const newStrip = buildStrip(items);
+
+    if (existing) {
+      existing.replaceWith(newStrip);
+      return;
+    }
+
     const main = document.querySelector('main') || document.querySelector('section') || document.body;
     if (!main) return;
 
-    const strip = buildStrip(items);
-
-    // Try finding the thread list or header to insert before/after
     const header = main.querySelector('header') || main.querySelector('h1')?.closest('div');
     const threadList = main.querySelector('a[href^="/direct/t/"]')?.closest('div[style*="overflow"]') || main.querySelector('div[role="list"]');
 
     if (header && header.parentNode) {
-      header.parentNode.insertBefore(strip, header.nextSibling);
+      header.parentNode.insertBefore(newStrip, header.nextSibling);
     } else if (threadList && threadList.parentNode) {
-      threadList.parentNode.insertBefore(strip, threadList);
+      threadList.parentNode.insertBefore(newStrip, threadList);
     } else {
-      main.prepend(strip);
+      main.prepend(newStrip);
     }
 
     STATE.rendered = true;
-    console.log(`[igzam] Strip inserted with ${items.length} bubbles`);
+    console.log(`[igzam] Strip mounted with ${items.length} bubbles`);
   }
 
-  // ─── Anti-Doomscroll Reels Lock ───────────────────────────────────────────
+  // ─── Anti-Doomscroll Reels Lock ─────────────────────────────────────────────
 
   let isTouchInsideComments = false;
   let touchStartY = 0;
@@ -696,7 +754,6 @@
         document.body.classList.add('igzam-reel-locked');
       }
 
-      // Loop video
       const videos = document.querySelectorAll('video');
       videos.forEach(v => {
         if (!v.dataset.igzamLooped) {
@@ -715,7 +772,6 @@
     }
   }
 
-  // Intercept Wheel
   window.addEventListener('wheel', e => {
     if (!isReelPage()) return;
     const inComments = e.target.closest('[role="dialog"], [aria-label*="Comment"], [aria-label*="comment"], ul[class*="comment"]');
@@ -727,7 +783,6 @@
     }
   }, { passive: false, capture: true });
 
-  // Intercept Touch vertical swipe
   window.addEventListener('touchstart', e => {
     if (!isReelPage()) return;
     const touch = e.touches[0];
@@ -748,7 +803,6 @@
     }
   }, { passive: false, capture: true });
 
-  // Intercept Arrow keys
   window.addEventListener('keydown', e => {
     if (!isReelPage()) return;
     if (['INPUT', 'TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable) return;
@@ -762,10 +816,11 @@
     }
   }, { capture: true });
 
-  // ─── MutationObserver & SPA Watcher ───────────────────────────────────────
+  // ─── MutationObserver & SPA Watcher ─────────────────────────────────────────
 
   function startObserver () {
     const observer = new MutationObserver(() => {
+      checkHomeRedirect();
       dismissAppPopups();
       checkReelLock();
       if (isDMsPage() && !document.getElementById('igzam-strip')) {
@@ -780,13 +835,13 @@
   }
 
   function onNavigate () {
+    checkHomeRedirect();
     dismissAppPopups();
     checkReelLock();
 
     if (isDMsPage()) {
-      if (!document.getElementById('igzam-strip')) {
-        loadData();
-      }
+      renderStrip();
+      loadData();
     }
   }
 
@@ -796,15 +851,17 @@
   history.replaceState = function (...a) { _replaceState.apply(this, a); onNavigate(); };
   window.addEventListener('popstate', onNavigate);
 
-  // ─── Boot ──────────────────────────────────────────────────────────────────
+  // ─── Boot ───────────────────────────────────────────────────────────────────
 
   function boot () {
+    checkHomeRedirect();
     injectCSS();
     startObserver();
     dismissAppPopups();
     checkReelLock();
 
     if (isDMsPage()) {
+      renderStrip();
       loadData();
     }
   }
